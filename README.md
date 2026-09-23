@@ -3,8 +3,10 @@
 基于 **Python + FastAPI + SQLite** 的机织纹样浮长审计服务。提交经纱穿综映射、
 踏板—综框绑综矩阵、逐纬踏综序列与最大浮长后，服务自动生成经纬交织矩阵，
 找出所有超过上限的**经向 / 纬向连续浮长**；纹样声明循环时，自动合并矩阵
-首尾跨边界的连续段。合法设计与审计结果入库，可按 ID 查询；维度不一致或
-索引越界的设计将被整份拒绝（HTTP 400，不入库）。此外可对已存设计做
+首尾跨边界的连续段。合法设计与审计结果入库，可按 ID 查询，也可通过
+`GET /designs/page` 按设计 ID 升序做 **keyset 分页只读遍历**（`limit`
+1～100、`after_id` 游标，多取一条判定后续页；遍历期间新增设计不会造成
+已返回项重复）；维度不一致或索引越界的设计将被整份拒绝（HTTP 400，不入库）。此外可对已存设计做
 **最小循环单元分析**：基于交织矩阵在经、纬两方向求能无缝平铺整幅的最小
 正周期与循环单元；以及**阈值敏感性分析**：在 1～上限内逐档重跑完整浮长
 审计，给出每档违规数与达到零违规的最小阈值。对超限设计，还可请求
@@ -142,6 +144,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | --- | --- | --- |
 | `POST` | `/designs` | 提交设计：校验 → 生成交织矩阵 → 浮长审计 → 入库，返回完整结果（201） |
 | `GET` | `/designs` | 列出全部合法设计（摘要，含是否超限） |
+| `GET` | `/designs/page` | 按设计 ID 升序 keyset 分页列出摘要（`limit` 1～100、`after_id` 游标，返回 `next_after_id`/`has_more`） |
 | `GET` | `/designs/{id}` | 按 ID 查询设计及其审计结果 |
 | `POST` | `/designs/{id}/tags` | 为设计追加去重标签（非空、≤32 字符，事务内校验）；成功 201，重复 409 |
 | `GET` | `/designs/{id}/tags` | 按首次添加顺序返回设计的标签列表与数量 |
@@ -212,6 +215,85 @@ curl -s -X POST http://localhost:8000/designs \
 curl -s http://localhost:8000/designs/1        # 设计 + 审计结果
 curl -s http://localhost:8000/designs/1/audit  # 仅审计结果
 curl -s http://localhost:8000/designs          # 全部设计摘要
+```
+
+### 分页查询设计（designs/page）
+
+`GET http://localhost:8000/designs/page`：以**设计 ID 升序 keyset（游标）
+分页**的方式只读列出设计摘要，适合设计数量较多时逐页遍历。SQLite 查询为
+`WHERE id > :after_id ORDER BY id LIMIT :limit+1`——**多取的 1 条只用于判定
+`has_more`，不会放进本页结果**：
+
+| 参数 | 范围 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `limit` | 1～100 的整数 | 是 | 本页返回条数上限 |
+| `after_id` | 正整数 | 否 | 游标：仅返回 ID **严格大于**该值的设计；首页省略（从头开始），后续页传上一页响应里的 `next_after_id` |
+
+响应字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `items[]` | 本页设计摘要（字段同 `GET /designs`），按 ID 升序，至多 `limit` 条 |
+| `next_after_id` | 下一页游标：`has_more=true` 时为**本页最后一条设计的 ID**；无后续页时为 `null` |
+| `has_more` | 游标之后是否还有未返回的设计 |
+
+游标使用**严格大于**比较且设计 ID 单调递增，因此**下一页从上一页最后返回
+的 ID 之后继续；遍历期间新提交的设计只会出现在游标之后，已返回项不会重复**
+（已删除的设计只会被跳过，同样不影响游标推进）。`limit` 缺失或不在
+1～100、`after_id` 非正整数（如 `0`、负数、小数、带空白等）一律返回
+**400**；`after_id` 超过当前最大 ID 不算错误，返回空页与 `has_more:false`。
+`GET /designs` 的一次性全量列表行为保持不变。
+
+```bash
+# 首页（省略 after_id）：每页 2 条
+curl -s 'http://localhost:8000/designs/page?limit=2'
+
+# 下一页：把上一页的 next_after_id 作为 after_id 传回
+curl -s 'http://localhost:8000/designs/page?limit=2&after_id=2'
+```
+
+响应（首页，库中已有 5 份设计）：
+
+```json
+{
+  "items": [
+    {"id": 1, "name": "2/2 twill", "cyclic": true, "max_float": 2,
+     "shafts": 4, "treadles": 4, "warp_ends": 8, "weft_picks": 8,
+     "exceeds": false, "created_at": "2026-09-23T00:00:00Z"},
+    {"id": 2, "name": "plain", "cyclic": false, "max_float": 1,
+     "shafts": 2, "treadles": 2, "warp_ends": 2, "weft_picks": 4,
+     "exceeds": false, "created_at": "2026-09-23T00:00:01Z"}
+  ],
+  "next_after_id": 2,
+  "has_more": true
+}
+```
+
+翻到末页（只剩 1 条）：
+
+```json
+{
+  "items": [
+    {"id": 5, "name": "2/2 twill", "cyclic": true, "max_float": 2,
+     "shafts": 4, "treadles": 4, "warp_ends": 8, "weft_picks": 8,
+     "exceeds": false, "created_at": "2026-09-23T00:00:04Z"}
+  ],
+  "next_after_id": null,
+  "has_more": false
+}
+```
+
+非法参数：
+
+```bash
+curl -s 'http://localhost:8000/designs/page'                 # 缺少 limit → 400
+curl -s 'http://localhost:8000/designs/page?limit=0'         # 越界 → 400
+curl -s 'http://localhost:8000/designs/page?limit=101'       # 越界 → 400
+curl -s 'http://localhost:8000/designs/page?limit=2&after_id=0'  # 非正整数 → 400
+```
+
+```json
+{"detail": "query param limit must be within 1..100, got 0"}
 ```
 
 ### 设计标签
@@ -1040,6 +1122,7 @@ curl -s http://localhost:8000/design-archives/1/verify
 
 ```bash
 python3 tests/test_weave.py                  # 核心逻辑单元测试（无外部依赖）
+python3 tests/test_api_designs_page.py       # designs/page keyset 分页接口集成测试
 python3 tests/test_api_repeat_period.py      # repeat-period 接口集成测试
 python3 tests/test_api_threshold_profile.py  # threshold-profile 接口集成测试
 python3 tests/test_api_compare.py            # compare 接口集成测试
@@ -1096,6 +1179,7 @@ app/
   models.py    # Pydantic 请求/响应模型
 tests/
   test_weave.py                   # 核心逻辑单元测试：python3 tests/test_weave.py
+  test_api_designs_page.py        # designs/page keyset 分页接口集成测试（TestClient，临时库）
   test_api_repeat_period.py       # repeat-period 接口集成测试（TestClient，临时库）
   test_api_threshold_profile.py   # threshold-profile 接口集成测试（TestClient，临时库）
   test_api_compare.py             # compare 接口集成测试（TestClient，临时库）

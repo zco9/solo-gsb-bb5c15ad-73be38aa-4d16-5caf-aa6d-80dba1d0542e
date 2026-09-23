@@ -100,6 +100,22 @@ class DesignSummary(BaseModel):
     created_at: str
 
 
+class DesignPageOut(BaseModel):
+    """GET /designs/page 的 keyset 分页结果。"""
+
+    items: list[DesignSummary] = Field(
+        ..., description="本页设计摘要，按设计 ID 升序，至多 limit 条"
+    )
+    next_after_id: int | None = Field(
+        ...,
+        description="下一页游标：has_more 时为本页最后一条设计的 ID（作为下次"
+        "请求的 after_id）；无后续页时为 null",
+    )
+    has_more: bool = Field(
+        ..., description="after_id（或本页游标）之后是否还有未返回的设计"
+    )
+
+
 class TieUpSuggestionOut(BaseModel):
     """单步绑综修复建议：翻转一个 tie_up 单元后违规总数严格减少的候选。"""
 

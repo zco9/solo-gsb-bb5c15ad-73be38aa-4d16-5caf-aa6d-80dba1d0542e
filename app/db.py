@@ -171,29 +171,64 @@ def get_design(design_id: int) -> dict | None:
         return _row_to_detail(design, audit)
 
 
+_SUMMARY_SELECT = """SELECT d.id, d.name, d.cyclic, d.max_float, d.shafts,
+                            d.treadles, d.warp_ends, d.weft_picks, d.created_at,
+                            a.exceeds
+                     FROM designs d JOIN audits a ON a.design_id = d.id"""
+
+
+def _row_to_summary(r: sqlite3.Row) -> dict:
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "cyclic": bool(r["cyclic"]),
+        "max_float": r["max_float"],
+        "shafts": r["shafts"],
+        "treadles": r["treadles"],
+        "warp_ends": r["warp_ends"],
+        "weft_picks": r["weft_picks"],
+        "exceeds": bool(r["exceeds"]),
+        "created_at": r["created_at"],
+    }
+
+
 def list_designs() -> list[dict]:
     with _lock, _connect() as conn:
         rows = conn.execute(
-            """SELECT d.id, d.name, d.cyclic, d.max_float, d.shafts, d.treadles,
-                      d.warp_ends, d.weft_picks, d.created_at, a.exceeds
-               FROM designs d JOIN audits a ON a.design_id = d.id
-               ORDER BY d.id"""
+            f"{_SUMMARY_SELECT} ORDER BY d.id"
         ).fetchall()
-        return [
-            {
-                "id": r["id"],
-                "name": r["name"],
-                "cyclic": bool(r["cyclic"]),
-                "max_float": r["max_float"],
-                "shafts": r["shafts"],
-                "treadles": r["treadles"],
-                "warp_ends": r["warp_ends"],
-                "weft_picks": r["weft_picks"],
-                "exceeds": bool(r["exceeds"]),
-                "created_at": r["created_at"],
-            }
-            for r in rows
-        ]
+        return [_row_to_summary(r) for r in rows]
+
+
+def list_designs_page(*, limit: int, after_id: int | None = None) -> dict:
+    """按设计 ID 升序的 keyset 分页（只读）：取 id > after_id 的前 limit 条
+    摘要，并多取一条用于判断是否还有后续页。
+
+    - after_id 为 None 时从头（id > 0）开始；下一页传上一页最后返回的 id；
+    - 多取的第 limit+1 条只用于判定 has_more，不放进结果；
+    - has_more 为 true 时 next_after_id 为本页最后一条的 id（即下一页的
+      after_id），否则为 None；
+    - 游标为严格大于比较：遍历期间新增的设计只会出现在最后一次见过的游标
+      之后，绝不会让已返回的项重复出现（设计只新增、ID 单调递增）。
+    """
+    cursor = after_id if after_id is not None else 0
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            f"""{_SUMMARY_SELECT}
+                WHERE d.id > ?
+                ORDER BY d.id
+                LIMIT ?""",
+            (cursor, limit + 1),
+        ).fetchall()
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        items = [_row_to_summary(r) for r in page_rows]
+        next_after_id = items[-1]["id"] if has_more and items else None
+        return {
+            "items": items,
+            "next_after_id": next_after_id,
+            "has_more": has_more,
+        }
 
 
 def _tags_of(conn: sqlite3.Connection, design_id: int) -> list[dict]:

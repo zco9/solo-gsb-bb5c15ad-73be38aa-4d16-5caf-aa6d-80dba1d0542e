@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -19,6 +20,7 @@ from .models import (
     DesignCompareOut,
     DesignIn,
     DesignOut,
+    DesignPageOut,
     DesignSummary,
     DesignTagIn,
     DesignTagsOut,
@@ -123,6 +125,66 @@ def submit_design(design: DesignIn) -> dict:
 def list_designs() -> list[dict]:
     """列出全部已入库的合法设计（摘要）。"""
     return db.list_designs()
+
+
+_NONNEG_INT_RE = re.compile(r"^[0-9]+$")
+
+
+def _parse_page_param(name: str, raw: str | None) -> int:
+    """解析分页查询参数：只接受无符号十进制整数字面量（拒绝 +/−、空白、
+    小数、八进制写法等），失败抛 400。"""
+    if raw is None or not _NONNEG_INT_RE.fullmatch(raw):
+        raise HTTPException(
+            status_code=400,
+            detail=f"query param {name} must be an integer, got {raw!r}",
+        )
+    return int(raw)
+
+
+# 路由声明在 /designs/{design_id} 之前，避免 "page" 落入整型路径参数
+@app.get(
+    "/designs/page",
+    response_model=DesignPageOut,
+    responses={
+        400: {"model": ErrorOut, "description": "分页参数非法：limit 缺失或不在"
+              " 1～100，after_id 非正整数"}
+    },
+    tags=["designs"],
+)
+def list_designs_page(
+    limit: str | None = Query(
+        default=None,
+        description="每页返回条数（必填，1～100）；SQL 实际多取 1 条用于"
+        "判断 has_more",
+    ),
+    after_id: str | None = Query(
+        default=None,
+        description="游标：仅返回设计 ID 严格大于该值的记录；首页省略，"
+        "下一页传上一页返回的 next_after_id",
+    ),
+) -> dict:
+    """只读分页列出设计摘要（按设计 ID 升序的 keyset 分页）。
+
+    游标为严格大于比较且设计 ID 单调递增：下一页从上一页最后返回的 ID
+    之后继续，**遍历期间新增的设计只会出现在游标之后，已返回项不会重复**。
+    limit 缺失或不在 1～100、after_id 非正整数均返回 400。
+    """
+    limit_value = _parse_page_param("limit", limit)
+    if not 1 <= limit_value <= 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"query param limit must be within 1..100, got {limit_value}",
+        )
+    after_id_value: int | None = None
+    if after_id is not None:
+        after_id_value = _parse_page_param("after_id", after_id)
+        if after_id_value < 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"query param after_id must be a positive integer, "
+                f"got {after_id_value}",
+            )
+    return db.list_designs_page(limit=limit_value, after_id=after_id_value)
 
 
 @app.get(
