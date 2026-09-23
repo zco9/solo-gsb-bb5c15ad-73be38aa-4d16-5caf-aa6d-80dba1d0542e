@@ -19,6 +19,7 @@ from .models import (
     DesignCompareOut,
     DesignIn,
     DesignOut,
+    DesignPageOut,
     DesignSummary,
     DesignTagIn,
     DesignTagsOut,
@@ -123,6 +124,66 @@ def submit_design(design: DesignIn) -> dict:
 def list_designs() -> list[dict]:
     """列出全部已入库的合法设计（摘要）。"""
     return db.list_designs()
+
+
+def _parse_positive_int_param(raw: str | None) -> int | None:
+    """解析正整数查询参数；非法（缺失、非十进制整数或小于 1）返回 None 由
+    调用方统一转 400——本接口约定参数非法返回 400，而非框架默认的 422。"""
+    if raw is None:
+        return None
+    text = raw.strip()
+    # isdigit() 拒绝负数、小数、科学计数法与空串；上标数字等非十进制数字
+    # 虽能通过 isdigit()，但 int() 会抛 ValueError 兜底拒绝。
+    if not text.isdigit():
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    if value < 1:
+        return None
+    return value
+
+
+@app.get(
+    "/designs/page",
+    response_model=DesignPageOut,
+    responses={
+        400: {"model": ErrorOut, "description": "参数非法：limit 缺失或不是 1～100 的整数，after_id 不是正整数"}
+    },
+    tags=["designs"],
+)
+def list_designs_page(
+    limit: str | None = Query(
+        default=None,
+        description="每页条数，1～100 的整数（必填）",
+    ),
+    after_id: str | None = Query(
+        default=None,
+        description="分页游标：上一页最后返回的设计 ID；缺省从 ID 最小的设计开始",
+    ),
+) -> dict:
+    """只读分页列出设计摘要（keyset 分页）。
+
+    按设计 ID 升序返回 ID 严格大于 `after_id` 的至多 `limit` 条轻量摘要，
+    并通过查询时多取一条给出 `has_more` 与 `next_after_id`。下一页把
+    `next_after_id` 原样作为 `after_id` 继续即可；设计 ID 单调递增，
+    遍历期间新增的设计只会出现在更高 ID 的后续页中，**不会让已返回项重复**。
+    参数非法（limit 缺失 / 超出 1～100，after_id 非正整数）返回 400。
+    """
+    page_limit = _parse_positive_int_param(limit)
+    if page_limit is None or page_limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be an integer between 1 and 100",
+        )
+    cursor = _parse_positive_int_param(after_id)
+    if after_id is not None and cursor is None:
+        raise HTTPException(
+            status_code=400,
+            detail="after_id must be a positive integer",
+        )
+    return db.list_designs_page(limit=page_limit, after_id=cursor)
 
 
 @app.get(

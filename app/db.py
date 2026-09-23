@@ -171,29 +171,68 @@ def get_design(design_id: int) -> dict | None:
         return _row_to_detail(design, audit)
 
 
+_SUMMARY_COLUMNS = (
+    "d.id, d.name, d.cyclic, d.max_float, d.shafts, d.treadles, "
+    "d.warp_ends, d.weft_picks, d.created_at, a.exceeds"
+)
+
+
+def _row_to_summary(r: sqlite3.Row) -> dict:
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "cyclic": bool(r["cyclic"]),
+        "max_float": r["max_float"],
+        "shafts": r["shafts"],
+        "treadles": r["treadles"],
+        "warp_ends": r["warp_ends"],
+        "weft_picks": r["weft_picks"],
+        "exceeds": bool(r["exceeds"]),
+        "created_at": r["created_at"],
+    }
+
+
 def list_designs() -> list[dict]:
     with _lock, _connect() as conn:
         rows = conn.execute(
-            """SELECT d.id, d.name, d.cyclic, d.max_float, d.shafts, d.treadles,
-                      d.warp_ends, d.weft_picks, d.created_at, a.exceeds
-               FROM designs d JOIN audits a ON a.design_id = d.id
-               ORDER BY d.id"""
+            f"""SELECT {_SUMMARY_COLUMNS}
+                 FROM designs d JOIN audits a ON a.design_id = d.id
+                 ORDER BY d.id"""
         ).fetchall()
-        return [
-            {
-                "id": r["id"],
-                "name": r["name"],
-                "cyclic": bool(r["cyclic"]),
-                "max_float": r["max_float"],
-                "shafts": r["shafts"],
-                "treadles": r["treadles"],
-                "warp_ends": r["warp_ends"],
-                "weft_picks": r["weft_picks"],
-                "exceeds": bool(r["exceeds"]),
-                "created_at": r["created_at"],
-            }
-            for r in rows
-        ]
+        return [_row_to_summary(r) for r in rows]
+
+
+def list_designs_page(*, limit: int, after_id: int | None) -> dict:
+    """只读 keyset 分页：按设计 ID 升序返回 ID 严格大于 after_id 的摘要。
+
+    每页多取一条（LIMIT limit + 1）判断是否还有后续页，全程一条 SQL、
+    同一读取快照。游标为上一页**最后返回的 ID**，下一页用 WHERE id > 游标
+    继续；设计 ID 由 AUTOINCREMENT 单调递增，遍历期间新增的设计只会落在
+    更高 ID 处（在后续某页出现一次），绝不会让已返回的 ID 重复出现。
+
+    返回 {"items": 摘要列表（至多 limit 条）,
+          "next_after_id": 下一页游标（本页最后一条 ID，无后续页时为 None）,
+          "has_more": after_id 之后是否还有超过 limit 条设计}。
+    """
+    # after_id 为 None（首页）时 (? IS NULL) 成立，d.id > ? 分支被短路；
+    # 两个 ? 绑定同一参数即可，无需拼接两条 SQL。
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT {_SUMMARY_COLUMNS}
+                 FROM designs d JOIN audits a ON a.design_id = d.id
+                 WHERE (? IS NULL OR d.id > ?)
+                 ORDER BY d.id
+                 LIMIT ?""",
+            (after_id, after_id, limit + 1),
+        ).fetchall()
+    has_more = len(rows) > limit
+    items = [_row_to_summary(r) for r in rows[:limit]]
+    next_after_id = items[-1]["id"] if has_more else None
+    return {
+        "items": items,
+        "next_after_id": next_after_id,
+        "has_more": has_more,
+    }
 
 
 def _tags_of(conn: sqlite3.Connection, design_id: int) -> list[dict]:

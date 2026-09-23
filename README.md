@@ -142,6 +142,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | --- | --- | --- |
 | `POST` | `/designs` | 提交设计：校验 → 生成交织矩阵 → 浮长审计 → 入库，返回完整结果（201） |
 | `GET` | `/designs` | 列出全部合法设计（摘要，含是否超限） |
+| `GET` | `/designs/page` | 只读 keyset 分页：`limit`（1～100）+ `after_id` 游标，按 ID 升序返回摘要、`next_after_id` 与 `has_more` |
 | `GET` | `/designs/{id}` | 按 ID 查询设计及其审计结果 |
 | `POST` | `/designs/{id}/tags` | 为设计追加去重标签（非空、≤32 字符，事务内校验）；成功 201，重复 409 |
 | `GET` | `/designs/{id}/tags` | 按首次添加顺序返回设计的标签列表与数量 |
@@ -213,6 +214,48 @@ curl -s http://localhost:8000/designs/1        # 设计 + 审计结果
 curl -s http://localhost:8000/designs/1/audit  # 仅审计结果
 curl -s http://localhost:8000/designs          # 全部设计摘要
 ```
+
+### 分页查询设计
+
+`GET http://localhost:8000/designs/page`：以 **keyset（游标）分页**只读列出
+设计摘要，适合设计数量较多时替代一次性返回全部的 `GET /designs`：
+
+- `limit`：**必填**，每页条数，取 **1～100 的整数**；
+- `after_id`：可选的**正整数**游标，传上一页响应中的 `next_after_id`，
+  返回 ID **严格大于**该游标的设计；缺省（首页）从 ID 最小的设计开始；
+- 响应按设计 ID 升序返回至多 `limit` 条与 `GET /designs` 同构的轻量摘要，
+  外加 `has_more`（游标之后是否还有设计）与 `next_after_id`（下一页游标，
+  即本页最后返回的 ID；无后续页时为 `null`）。
+
+服务端按 `WHERE id > after_id ORDER BY id LIMIT limit+1` 查询，**多取一条**
+判断是否有后续页。设计 ID 由 SQLite `AUTOINCREMENT` 单调递增，因此遍历
+期间新增的设计只会落在尚未访问的更高 ID 区间，在后续某页恰好出现一次，
+**不会导致已返回项重复或跳页**。`limit` 缺失 / 超出 1～100、`after_id`
+非正整数均返回 **400**；`after_id` 超过当前最大 ID 时返回空页而非报错。
+
+```bash
+# 首页：每页 20 条
+curl -s 'http://localhost:8000/designs/page?limit=20'
+
+# 下一页：把上一页的 next_after_id 原样作为 after_id
+curl -s 'http://localhost:8000/designs/page?limit=20&after_id=20'
+```
+
+响应示例：
+
+```json
+{
+  "items": [
+    {"id": 21, "name": "2/2 twill", "cyclic": true, "max_float": 2,
+     "shafts": 4, "treadles": 4, "warp_ends": 8, "weft_picks": 8,
+     "exceeds": false, "created_at": "2026-09-21T00:00:00Z"}
+  ],
+  "next_after_id": 21,
+  "has_more": true
+}
+```
+
+翻到末页时 `has_more` 为 `false`、`next_after_id` 为 `null`，遍历结束。
 
 ### 设计标签
 
